@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Dodge — one prompt, one game</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #07070f; height: 100%; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: "DejaVu Sans", system-ui, sans-serif; }
+  #wrap { position: relative; width: min(100vw, 177.78vh); aspect-ratio: 16 / 9; }
+  canvas { width: 100%; height: 100%; display: block; background: #0b0b1e; }
+  #hint {
+    position: absolute; left: 0; right: 0; bottom: 10px; text-align: center;
+    color: #9aa0c3; font-size: 13px; letter-spacing: .04em; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="hint">Arrow keys / WASD to fly &nbsp;·&nbsp; dodge the asteroids &nbsp;·&nbsp; grab the stars &nbsp;·&nbsp; R to restart</div>
+</div>
+<script>
+"use strict";
+// Star Dodge — a tiny browser game built from one prompt:
+// "Build a tiny browser game where a little rocket dodges falling asteroids
+//  and collects stars — arrow keys to fly, 60 seconds on the clock, most stars wins."
+//
+// Rules: fly the rocket, dodge grey asteroids (3 hits and you are done),
+// collect gold stars (+1 each), survive the 60 second clock. Most stars wins.
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+const GAME_SECONDS = 60;
+const params = new URLSearchParams(location.search);
+const AUTO = params.get("auto") === "1"; // demo autopilot: plays the real game by itself
+
+const keys = Object.create(null);
+addEventListener("keydown", (e) => {
+  keys[e.key.toLowerCase()] = true;
+  if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(e.key.toLowerCase())) e.preventDefault();
+  if (e.key.toLowerCase() === "r") reset();
+  if (state === "title") start();
+});
+addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+let state;      // "title" | "playing" | "over"
+let rocket, asteroids, stars, parts;
+let score, lives, timeLeft, spawnT, starT, elapsed, overT;
+
+function reset() {
+  state = "title";
+  rocket = { x: W / 2, y: H - 90, vx: 0, vy: 0, r: 16 };
+  asteroids = [];
+  stars = [];
+  parts = [];
+  score = 0; lives = 3; timeLeft = GAME_SECONDS; spawnT = 0; starT = 0; elapsed = 0; overT = 0;
+  if (AUTO) start();
+}
+
+function start() {
+  if (state === "playing") return;
+  state = "playing";
+  elapsed = 0;
+}
+
+function spawnAsteroid() {
+  const r = rand(14, 30);
+  asteroids.push({ x: rand(r, W - r), y: -r - 10, r, vy: rand(140, 230) + elapsed * 2.2, rot: rand(0, 6.28), vr: rand(-1.5, 1.5) });
+}
+
+function spawnStar() {
+  const r = 11;
+  stars.push({ x: rand(30, W - 30), y: -20, r, vy: rand(90, 150), tw: rand(0, 6.28) });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, 6.28), sp = rand(40, 220);
+    parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: rand(0.3, 0.8), max: 0.8, color });
+  }
+}
+
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+function autopilot(dt) {
+  // Steer toward the nearest star, away from the nearest asteroid. Real inputs,
+  // same physics as a human player: it just presses the keys for us.
+  let tx = rocket.x, ty = rocket.y;
+  let nearestStar = null, nearestRock = null;
+  for (const s of stars) if (s.y < H && (!nearestStar || dist(s, rocket) < dist(nearestStar, rocket))) nearestStar = s;
+  for (const a of asteroids) if (a.y > 0 && a.y < rocket.y + 40 && (!nearestRock || a.y > nearestRock.y)) nearestRock = a;
+  if (nearestStar) { tx = nearestStar.x; ty = nearestStar.y; }
+  // A rock closing in from above beats star-chasing: dodge early and wide.
+  if (nearestRock && Math.abs(nearestRock.x - rocket.x) < 120 && nearestRock.y > rocket.y - 260 && nearestRock.y < rocket.y + 60) {
+    tx = nearestRock.x < rocket.x ? rocket.x + 220 : rocket.x - 220;
+    ty = rocket.y; // dodge sideways, hold height
+  }
+  keys["arrowleft"] = keys["a"] = tx < rocket.x - 8;
+  keys["arrowright"] = keys["d"] = tx > rocket.x + 8;
+  keys["arrowup"] = keys["w"] = ty < rocket.y - 8;
+  keys["arrowdown"] = keys["s"] = ty > rocket.y + 8;
+}
+
+function update(dt) {
+  // In demo mode the show goes on: a fresh run starts shortly after game over.
+  if (state === "over" && AUTO) {
+    overT += dt;
+    if (overT > 1.2) reset();
+    return;
+  }
+  if (state !== "playing") return;
+  elapsed += dt;
+  timeLeft = Math.max(0, GAME_SECONDS - elapsed);
+  if (timeLeft <= 0) { state = "over"; return; }
+
+  if (AUTO) autopilot(dt);
+
+  const ACC = 1500, MAXV = 340;
+  if (keys["arrowleft"] || keys["a"]) rocket.vx -= ACC * dt;
+  if (keys["arrowright"] || keys["d"]) rocket.vx += ACC * dt;
+  if (keys["arrowup"] || keys["w"]) rocket.vy -= ACC * dt;
+  if (keys["arrowdown"] || keys["s"]) rocket.vy += ACC * dt;
+  rocket.vx = clamp(rocket.vx, -MAXV, MAXV);
+  rocket.vy = clamp(rocket.vy, -MAXV, MAXV);
+  rocket.vx *= Math.pow(0.12, dt); // snappy drag
+  rocket.vy *= Math.pow(0.12, dt);
+  rocket.x = clamp(rocket.x + rocket.vx * dt, 24, W - 24);
+  rocket.y = clamp(rocket.y + rocket.vy * dt, 60, H - 24);
+
+  spawnT -= dt;
+  if (spawnT <= 0) { spawnAsteroid(); spawnT = rand(0.35, 0.7) - Math.min(0.25, elapsed * 0.004); }
+  starT -= dt;
+  if (starT <= 0) { spawnStar(); starT = rand(0.45, 0.85); }
+
+  for (const a of asteroids) { a.y += a.vy * dt; a.rot += a.vr * dt; }
+  for (const s of stars) { s.y += s.vy * dt; s.tw += dt * 5; }
+  asteroids = asteroids.filter((a) => a.y < H + 50);
+  stars = stars.filter((s) => s.y < H + 30);
+
+  for (let i = asteroids.length - 1; i >= 0; i--) {
+    const a = asteroids[i];
+    if (dist(a, rocket) < a.r + rocket.r - 6) {
+      asteroids.splice(i, 1);
+      lives -= 1;
+      burst(rocket.x, rocket.y, "#ff5d5d", 22);
+      rocket.x = W / 2; rocket.y = H - 90; rocket.vx = 0; rocket.vy = 0;
+      if (lives <= 0) { state = "over"; return; }
+    }
+  }
+  for (let i = stars.length - 1; i >= 0; i--) {
+    const s = stars[i];
+    if (dist(s, rocket) < s.r + rocket.r) {
+      stars.splice(i, 1);
+      score += 1;
+      burst(s.x, s.y, "#ffd94a", 12);
+    }
+  }
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+}
+
+function drawRocket() {
+  ctx.save();
+  ctx.translate(rocket.x, rocket.y);
+  const flame = 10 + Math.random() * 8;
+  ctx.fillStyle = "#ff9d2e";
+  ctx.beginPath();
+  ctx.moveTo(-7, 12); ctx.lineTo(0, 12 + flame + 10); ctx.lineTo(7, 12);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#e8ecff";
+  ctx.beginPath();
+  ctx.moveTo(0, -20); ctx.quadraticCurveTo(12, -4, 10, 12); ctx.lineTo(-10, 12);
+  ctx.quadraticCurveTo(-12, -4, 0, -20);
+  ctx.fill();
+  ctx.fillStyle = "#c41c83";
+  ctx.beginPath(); ctx.arc(0, -4, 5, 0, 6.29); ctx.fill();
+  ctx.fillStyle = "#7dd7ff";
+  ctx.beginPath(); ctx.arc(0, -4, 2.6, 0, 6.29); ctx.fill();
+  ctx.fillStyle = "#c41c83";
+  ctx.beginPath(); ctx.moveTo(-10, 4); ctx.lineTo(-20, 16); ctx.lineTo(-10, 14); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(10, 4); ctx.lineTo(20, 16); ctx.lineTo(10, 14); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawAsteroid(a) {
+  ctx.save();
+  ctx.translate(a.x, a.y); ctx.rotate(a.rot);
+  ctx.fillStyle = "#8b8fa8";
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const ang = (i / 8) * 6.283, rr = a.r * (0.82 + 0.18 * Math.sin(i * 2.7 + a.rot));
+    i === 0 ? ctx.moveTo(Math.cos(ang) * rr, Math.sin(ang) * rr) : ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#6d7190";
+  ctx.beginPath(); ctx.arc(-a.r * 0.3, -a.r * 0.2, a.r * 0.22, 0, 6.29); ctx.fill();
+  ctx.beginPath(); ctx.arc(a.r * 0.35, a.r * 0.3, a.r * 0.16, 0, 6.29); ctx.fill();
+  ctx.restore();
+}
+
+function drawStar(s) {
+  const tw = 0.75 + 0.25 * Math.sin(s.tw);
+  ctx.save();
+  ctx.translate(s.x, s.y); ctx.scale(tw, tw);
+  ctx.fillStyle = "#ffd94a";
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const ang = (i / 10) * 6.283 - 1.5708, rr = i % 2 === 0 ? s.r : s.r * 0.45;
+    i === 0 ? ctx.moveTo(Math.cos(ang) * rr, Math.sin(ang) * rr) : ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawBackground(t) {
+  ctx.fillStyle = "#0b0b1e";
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#ffffff";
+  for (let i = 0; i < 90; i++) {
+    const x = (i * 137.5) % W, y = (i * 89.3 + t * 12) % H;
+    ctx.globalAlpha = 0.25 + 0.55 * ((i * 7) % 10) / 10;
+    ctx.fillRect(x, y, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 26px 'DejaVu Sans', sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("★ " + score, 18, 38);
+  ctx.textAlign = "center";
+  ctx.fillText("⏱ " + Math.ceil(timeLeft) + "s", W / 2, 38);
+  ctx.textAlign = "right";
+  ctx.fillText("♥".repeat(Math.max(0, lives)) + "♡".repeat(Math.max(0, 3 - lives)), W - 18, 38);
+  ctx.textAlign = "left";
+}
+
+function drawCenter(lines, y0) {
+  ctx.textAlign = "center";
+  lines.forEach((ln, i) => {
+    ctx.font = ln.big ? "bold 44px 'DejaVu Sans', sans-serif" : "20px 'DejaVu Sans', sans-serif";
+    ctx.fillStyle = ln.color || "#ffffff";
+    ctx.fillText(ln.text, W / 2, y0 + i * 44);
+  });
+  ctx.textAlign = "left";
+}
+
+function draw(t) {
+  drawBackground(t);
+  for (const s of stars) drawStar(s);
+  for (const a of asteroids) drawAsteroid(a);
+  for (const p of parts) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+  if (state !== "over") drawRocket();
+  drawHUD();
+  if (state === "title") {
+    ctx.fillStyle = "rgba(7,7,15,0.55)";
+    ctx.fillRect(0, 0, W, H);
+    drawCenter([
+      { text: "★ STAR DODGE ★", big: true, color: "#ffd94a" },
+      { text: "one prompt. one agent. one game.", color: "#9aa0c3" },
+      { text: "dodge the asteroids — grab the stars — 60 seconds", color: "#ffffff" },
+      { text: AUTO ? "demo mode: autopilot is flying" : "press any key to launch", color: "#7dd7ff" },
+    ], H / 2 - 60);
+  }
+  if (state === "over") {
+    ctx.fillStyle = "rgba(7,7,15,0.6)";
+    ctx.fillRect(0, 0, W, H);
+    drawCenter([
+      { text: timeLeft <= 0 ? "TIME UP!" : "GAME OVER", big: true, color: "#ffd94a" },
+      { text: "you collected " + score + (score === 1 ? " star" : " stars"), color: "#ffffff" },
+      { text: "press R to fly again", color: "#7dd7ff" },
+    ], H / 2 - 40);
+  }
+}
+
+let last = performance.now();
+function frame(now) {
+  // Clamp the step so a slow frame (or a throttled background tab) cannot
+  // tunnel the rocket through an asteroid, while slow machines still play
+  // in real time instead of slow motion.
+  const dt = Math.min(0.25, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw(now / 1000);
+  requestAnimationFrame(frame);
+}
+
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
